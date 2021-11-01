@@ -3,7 +3,7 @@ regression
 [![License][license-image]][license-url]
 
 [license-image]: http://img.shields.io/badge/license-MIT-green.svg?style=flat-square
-[license-url]: LICENSE.txt
+[license-url]: LICENSE
 
 Goで重回帰分析するライブラリ  
 Multivariable Linear Regression in Go (golang)
