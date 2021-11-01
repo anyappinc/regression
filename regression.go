@@ -29,7 +29,6 @@ type Regression struct {
 	VariancePredicted float64
 	initialised       bool
 	Formula           string
-	crosses           []featureCross
 	hasRun            bool
 }
 
@@ -58,11 +57,6 @@ func DataPoint(obs float64, vars []float64) *dataPoint {
 func (r *Regression) Predict(vars []float64) (float64, error) {
 	if !r.initialised {
 		return 0, ErrNotEnoughData
-	}
-
-	// apply any features crosses to vars
-	for _, cross := range r.crosses {
-		vars = append(vars, cross.Calculate(vars)...)
 	}
 
 	p := r.Coeff(0)
@@ -100,11 +94,6 @@ func (r *Regression) GetVar(i int) string {
 	return x
 }
 
-// AddCross registers a feature cross to be applied to the data points.
-func (r *Regression) AddCross(cross featureCross) {
-	r.crosses = append(r.crosses, cross)
-}
-
 // Train the regression with some data points.
 func (r *Regression) Train(d ...*dataPoint) {
 	r.data = append(r.data, d...)
@@ -113,29 +102,9 @@ func (r *Regression) Train(d ...*dataPoint) {
 	}
 }
 
-// Apply any feature crosses, generating new observations and updating the data points, as well as
-// populating variable names for the feature crosses.
-// this should only be run once, as part of Run().
-func (r *Regression) applyCrosses() {
-	unusedVariableIndexCursor := len(r.data[0].Variables)
-	for _, point := range r.data {
-		for _, cross := range r.crosses {
-			point.Variables = append(point.Variables, cross.Calculate(point.Variables)...)
-		}
-	}
-
-	if len(r.names.vars) == 0 {
-		r.names.vars = make(map[int]string, 5)
-	}
-	for _, cross := range r.crosses {
-		unusedVariableIndexCursor += cross.ExtendNames(r.names.vars, unusedVariableIndexCursor)
-	}
-}
-
 // Run determines if there is enough data present to run the regression
 // and whether or not the training has already been completed.
-// Once the above checks have passed feature crosses are applied if any
-// and the model is trained using QR decomposition.
+// The model is trained using QR decomposition.
 func (r *Regression) Run() error {
 	if !r.initialised {
 		return ErrNotEnoughData
@@ -144,8 +113,6 @@ func (r *Regression) Run() error {
 		return ErrRegressionRun
 	}
 
-	//apply any features crosses
-	r.applyCrosses()
 	r.hasRun = true
 
 	observations := len(r.data)
