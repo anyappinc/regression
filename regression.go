@@ -2,344 +2,533 @@ package regression
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"strconv"
-	"strings"
 
+	"github.com/anyappinc/regression/logger"
 	"gonum.org/v1/gonum/mat"
+	"gonum.org/v1/gonum/stat"
+	"gonum.org/v1/gonum/stat/distuv"
 )
 
 var (
-	// ErrNotEnoughData signals that there weren't enough datapoint to train the model.
-	ErrNotEnoughData = errors.New("not enough data points")
-	// ErrTooManyVars signals that there are too many variables for the number of observations being made.
-	ErrTooManyVars = errors.New("not enough observations to to support this many variables")
-	// ErrRegressionRun signals that the Run method has already been called on the trained dataset.
-	ErrRegressionRun = errors.New("regression has already been run")
+	// ErrNotEnoughObservations signals that there weren't enough observations to train the model.
+	ErrNotEnoughObservations = errors.New("not enough observations")
+	// ErrTooManyExplanatoryVars signals that there are too many explanatory variables for the number of observations being made.
+	ErrTooManyExplanatoryVars = errors.New("not enough observations to support this many explanatory variables")
+	// ErrNoExplanatoryVars signals that there is no explanatory variables to train the model.
+	ErrNoExplanatoryVars = errors.New("no explanatory variables to train the models")
+	// ErrInvalidArgument signals that any of given arguments to call the function was invalid.
+	ErrInvalidArgument = errors.New("invalid argument")
 )
+
+type observation struct {
+	objectiveVar    float64   // 目的変数
+	explanatoryVars []float64 // 説明変数
+}
+
+// NewObservation creates a well formed *observation used for training.
+func NewObservation(o float64, es []float64) *observation {
+	return &observation{objectiveVar: o, explanatoryVars: es}
+}
+
+func calcPredictedVal(observations []float64, coeffs []float64, intercept float64) (float64, error) {
+	if len(observations) != len(coeffs) {
+		return 0, ErrInvalidArgument
+	}
+	var p float64
+	for i, obs := range observations {
+		p += obs * coeffs[i]
+	}
+	return p + intercept, nil
+}
 
 // Regression is the exposed data structure for interacting with the API.
 type Regression struct {
-	names             describe
-	data              []*dataPoint
-	coeff             map[int]float64
-	R2                float64
-	Varianceobserved  float64
-	VariancePredicted float64
-	initialised       bool
-	Formula           string
-	crosses           []featureCross
-	hasRun            bool
+	objectiveVars                  []float64        // 目的変数の観測値
+	objectiveVarLabel              *string          // 目的変数の名称
+	explanatoryVarsMatrix          [][]float64      // 説明変数、各行が1説明変数、各列に説明変数ごとの観測値
+	explanatoryVarsLabelMap        map[int]string   // 説明変数の名称
+	disregardingExplanatoryVarsSet map[int]struct{} // 分析に使わない説明変数のインデックスのセット
 }
 
-type dataPoint struct {
-	Observed  float64
-	Variables []float64
-	Predicted float64
-	Error     float64
-}
-
-type describe struct {
-	obs  string
-	vars map[int]string
-}
-
-// DataPoints is a slice of *dataPoint
-// This type allows for easier construction of training data points.
-type DataPoints []*dataPoint
-
-// DataPoint creates a well formed *datapoint used for training.
-func DataPoint(obs float64, vars []float64) *dataPoint {
-	return &dataPoint{Observed: obs, Variables: vars}
-}
-
-// Predict updates the "Predicted" value for the inputed features.
-func (r *Regression) Predict(vars []float64) (float64, error) {
-	if !r.initialised {
-		return 0, ErrNotEnoughData
-	}
-
-	// apply any features crosses to vars
-	for _, cross := range r.crosses {
-		vars = append(vars, cross.Calculate(vars)...)
-	}
-
-	p := r.Coeff(0)
-	for j := 1; j < len(r.data[0].Variables)+1; j++ {
-		p += r.Coeff(j) * vars[j-1]
-	}
-	return p, nil
-}
-
-// SetObserved sets the name of the observed value.
-func (r *Regression) SetObserved(name string) {
-	r.names.obs = name
-}
-
-// GetObserved gets the name of the observed value.
-func (r *Regression) GetObserved() string {
-	return r.names.obs
-}
-
-// SetVar sets the name of variable i.
-func (r *Regression) SetVar(i int, name string) {
-	if len(r.names.vars) == 0 {
-		r.names.vars = make(map[int]string, 5)
-	}
-	r.names.vars[i] = name
-}
-
-// GetVar gets the name of variable i
-func (r *Regression) GetVar(i int) string {
-	x := r.names.vars[i]
-	if x == "" {
-		s := []string{"X", strconv.Itoa(i)}
-		return strings.Join(s, "")
-	}
-	return x
-}
-
-// AddCross registers a feature cross to be applied to the data points.
-func (r *Regression) AddCross(cross featureCross) {
-	r.crosses = append(r.crosses, cross)
-}
-
-// Train the regression with some data points.
-func (r *Regression) Train(d ...*dataPoint) {
-	r.data = append(r.data, d...)
-	if len(r.data) > 2 {
-		r.initialised = true
+// NewRegression initializes the structure and returns it for interacting with regression APIs.
+func NewRegression() *Regression {
+	return &Regression{
+		explanatoryVarsLabelMap:        map[int]string{},
+		disregardingExplanatoryVarsSet: map[int]struct{}{},
 	}
 }
 
-// Apply any feature crosses, generating new observations and updating the data points, as well as
-// populating variable names for the feature crosses.
-// this should only be run once, as part of Run().
-func (r *Regression) applyCrosses() {
-	unusedVariableIndexCursor := len(r.data[0].Variables)
-	for _, point := range r.data {
-		for _, cross := range r.crosses {
-			point.Variables = append(point.Variables, cross.Calculate(point.Variables)...)
+// SetObjectiveVariableLabel sets the label of the objective variable.
+func (r *Regression) SetObjectiveVariableLabel(label string) {
+	r.objectiveVarLabel = &label
+}
+
+// GetObjectiveVariableLabel gets the label of the objective variable.
+func (r *Regression) GetObjectiveVariableLabel() string {
+	if r.objectiveVarLabel == nil {
+		return "Y"
+	}
+	return *r.objectiveVarLabel
+}
+
+// SetExplanatoryVariableLabel sets the label of i-th explanatory variable.
+func (r *Regression) SetExplanatoryVariableLabel(i int, label string) {
+	r.explanatoryVarsLabelMap[i] = label
+}
+
+// GetExplanatoryVariableLabel gets the label of i-th explanatory variable.
+func (r *Regression) GetExplanatoryVariableLabel(i int) string {
+	label, ok := r.explanatoryVarsLabelMap[i]
+	if !ok {
+		return "X" + strconv.Itoa(i)
+	}
+	return label
+}
+
+// DisregardIndex adds given index to the disregarding set
+func (r *Regression) DisregardIndex(idx int) {
+	r.disregardingExplanatoryVarsSet[idx] = struct{}{}
+}
+
+// ResetDisregarding : 無視する説明変数の設定をリセットする
+func (r *Regression) ResetDisregarding() {
+	r.disregardingExplanatoryVarsSet = map[int]struct{}{}
+}
+
+// AddObservations adds observations.
+func (r *Regression) AddObservations(observations ...*observation) error {
+	if observations == nil {
+		return nil
+	}
+	numOfExplanatoryVars := len(observations[0].explanatoryVars)
+	if numOfExplanatoryVars == 0 {
+		return ErrInvalidArgument
+	}
+	// すべての観測値の説明変数の数が一致していることを確認
+	for _, obs := range observations[1:] {
+		if len(obs.explanatoryVars) != numOfExplanatoryVars {
+			return ErrInvalidArgument
 		}
 	}
-
-	if len(r.names.vars) == 0 {
-		r.names.vars = make(map[int]string, 5)
-	}
-	for _, cross := range r.crosses {
-		unusedVariableIndexCursor += cross.ExtendNames(r.names.vars, unusedVariableIndexCursor)
-	}
-}
-
-// Run determines if there is enough data present to run the regression
-// and whether or not the training has already been completed.
-// Once the above checks have passed feature crosses are applied if any
-// and the model is trained using QR decomposition.
-func (r *Regression) Run() error {
-	if !r.initialised {
-		return ErrNotEnoughData
-	}
-	if r.hasRun {
-		return ErrRegressionRun
+	if r.explanatoryVarsMatrix != nil {
+		// 観測値の説明変数の数と既にセットされている説明変数の数が一致していることを確認
+		if numOfExplanatoryVars != len(r.explanatoryVarsMatrix) {
+			return ErrInvalidArgument
+		}
+	} else {
+		// 初期化
+		r.explanatoryVarsMatrix = make([][]float64, numOfExplanatoryVars)
 	}
 
-	//apply any features crosses
-	r.applyCrosses()
-	r.hasRun = true
-
-	observations := len(r.data)
-	numOfvars := len(r.data[0].Variables)
-
-	if observations < (numOfvars + 1) {
-		return ErrTooManyVars
-	}
-
-	// Create some blank variable space
-	observed := mat.NewDense(observations, 1, nil)
-	variables := mat.NewDense(observations, numOfvars+1, nil)
-
-	for i := 0; i < observations; i++ {
-		observed.Set(i, 0, r.data[i].Observed)
-		for j := 0; j < numOfvars+1; j++ {
-			if j == 0 {
-				variables.Set(i, 0, 1)
-			} else {
-				variables.Set(i, j, r.data[i].Variables[j-1])
-			}
+	for _, obs := range observations {
+		r.objectiveVars = append(r.objectiveVars, obs.objectiveVar)
+		for i, ev := range obs.explanatoryVars {
+			r.explanatoryVarsMatrix[i] = append(r.explanatoryVarsMatrix[i], ev)
 		}
 	}
-
-	// Now run the regression
-	_, n := variables.Dims() // cols
-	qr := new(mat.QR)
-	qr.Factorize(variables)
-	q := new(mat.Dense)
-	reg := new(mat.Dense)
-	qr.QTo(q)
-	qr.RTo(reg)
-
-	qtr := q.T()
-	qty := new(mat.Dense)
-	qty.Mul(qtr, observed)
-
-	c := make([]float64, n)
-	for i := n - 1; i >= 0; i-- {
-		c[i] = qty.At(i, 0)
-		for j := i + 1; j < n; j++ {
-			c[i] -= c[j] * reg.At(i, j)
-		}
-		c[i] /= reg.At(i, i)
-	}
-
-	// Output the regression results
-	r.coeff = make(map[int]float64, numOfvars)
-	for i, val := range c {
-		r.coeff[i] = val
-		if i == 0 {
-			r.Formula = fmt.Sprintf("Predicted = %.4f", val)
-		} else {
-			r.Formula += fmt.Sprintf(" + %v*%.4f", r.GetVar(i-1), val)
-		}
-	}
-
-	r.calcPredicted()
-	r.calcVariance()
-	r.calcR2()
 	return nil
 }
 
-// Coeff returns the calculated coefficient for variable i.
-func (r *Regression) Coeff(i int) float64 {
-	if len(r.coeff) == 0 {
-		return 0
-	}
-	return r.coeff[i]
-}
-
-// GetCoeffs returns the calculated coefficients. The element at index 0 is the offset.
-func (r *Regression) GetCoeffs() []float64 {
-	if len(r.coeff) == 0 {
-		return nil
-	}
-	coeffs := make([]float64, len(r.coeff))
-	for i := range coeffs {
-		coeffs[i] = r.coeff[i]
-	}
-	return coeffs
-}
-
-func (r *Regression) calcPredicted() string {
-	observations := len(r.data)
-	var predicted float64
-	var output string
-	for i := 0; i < observations; i++ {
-		r.data[i].Predicted, _ = r.Predict(r.data[i].Variables)
-		r.data[i].Error = r.data[i].Predicted - r.data[i].Observed
-
-		output += fmt.Sprintf("%v. observed = %v, Predicted = %v, Error = %v", i, r.data[i].Observed, predicted, r.data[i].Error)
-	}
-	return output
-}
-
-func (r *Regression) calcVariance() string {
-	observations := len(r.data)
-	var obtotal, prtotal, obvar, prvar float64
-	for i := 0; i < observations; i++ {
-		obtotal += r.data[i].Observed
-		prtotal += r.data[i].Predicted
-	}
-	obaverage := obtotal / float64(observations)
-	praverage := prtotal / float64(observations)
-
-	for i := 0; i < observations; i++ {
-		obvar += math.Pow(r.data[i].Observed-obaverage, 2)
-		prvar += math.Pow(r.data[i].Predicted-praverage, 2)
-	}
-	r.Varianceobserved = obvar / float64(observations)
-	r.VariancePredicted = prvar / float64(observations)
-	return fmt.Sprintf("N = %v\nVariance observed = %v\nVariance Predicted = %v\n", observations, r.Varianceobserved, r.VariancePredicted)
-}
-
-func (r *Regression) calcR2() string {
-	r.R2 = r.VariancePredicted / r.Varianceobserved
-	return fmt.Sprintf("R2 = %.2f", r.R2)
-}
-
-func (r *Regression) calcResiduals() string {
-	str := fmt.Sprintf("Residuals:\nobserved|\tPredicted|\tResidual\n")
-	for _, d := range r.data {
-		str += fmt.Sprintf("%.2f|\t%.2f|\t%.2f\n", d.Observed, d.Predicted, d.Observed-d.Predicted)
-	}
-	str += "\n"
-	return str
-}
-
-// String satisfies the stringer interface to display a dataPoint as a string.
-func (d *dataPoint) String() string {
-	str := fmt.Sprintf("%.2f", d.Observed)
-	for _, v := range d.Variables {
-		str += fmt.Sprintf("|\t%.2f", v)
-	}
-	return str
-}
-
-// String satisfies the stringer interface to display a regression as a string.
-func (r *Regression) String() string {
-	if !r.initialised {
-		return ErrNotEnoughData.Error()
-	}
-	str := fmt.Sprintf("%v", r.GetObserved())
-	for i := 0; i < len(r.names.vars); i++ {
-		str += fmt.Sprintf("|\t%v", r.GetVar(i))
-	}
-	str += "\n"
-	for _, d := range r.data {
-		str += fmt.Sprintf("%v\n", d)
-	}
-	fmt.Println(r.calcResiduals())
-	str += fmt.Sprintf("\nN = %v\nVariance observed = %v\nVariance Predicted = %v", len(r.data), r.Varianceobserved, r.VariancePredicted)
-	str += fmt.Sprintf("\nR2 = %v\n", r.R2)
-	return str
-}
-
-// MakeDataPoints makes a `[]*dataPoint` from a `[][]float64`. The expected fomat for the input is a row-major [][]float64.
-// That is to say the first slice represents a row, and the second represents the cols.
-// Furthermore it is expected that all the col slices are of the same length.
-// The obsIndex parameter indicates which column should be used
-func MakeDataPoints(a [][]float64, obsIndex int) []*dataPoint {
-	if obsIndex != 0 && obsIndex != len(a[0])-1 {
-		return perverseMakeDataPoints(a, obsIndex)
+func (r *Regression) run() (*basicRawModel, error) {
+	if len(r.objectiveVars) <= 2 {
+		return nil, ErrNotEnoughObservations
 	}
 
-	retVal := make([]*dataPoint, 0, len(a))
-	if obsIndex == 0 {
-		for _, r := range a {
-			retVal = append(retVal, DataPoint(r[0], r[1:]))
+	numOfObservations := len(r.objectiveVars) // == len(r.explanatoryVarsMatrix[n])
+	disregardedExplanatoryVarsSet := map[int]struct{}{}
+	numOfExplanatoryVars := func() int {
+		_numOfExplanatoryVars, _numToIgnore := len(r.explanatoryVarsMatrix), len(r.disregardingExplanatoryVarsSet)
+		for idx := range r.disregardingExplanatoryVarsSet {
+			if idx < 0 || idx >= _numOfExplanatoryVars {
+				logger.Warn.Printf("Cannot ignore index %d: index out of range [0:%d]", idx, _numOfExplanatoryVars)
+				_numToIgnore--
+			}
+			disregardedExplanatoryVarsSet[idx] = struct{}{}
 		}
-		return retVal
+		return _numOfExplanatoryVars - _numToIgnore
+	}()
+
+	if numOfExplanatoryVars == 0 {
+		return nil, ErrNoExplanatoryVars
+	} else if numOfExplanatoryVars >= numOfObservations {
+		return nil, ErrTooManyExplanatoryVars
 	}
 
-	// otherwise the observation is expected to be the last col
-	last := len(a[0]) - 1
-	for _, r := range a {
-		retVal = append(retVal, DataPoint(r[last], r[:last]))
+	// 元のインデックスと実際のインデックスの対応表を作成する
+	// 説明変数の名称を抽出する
+	indexesTable, explanatoryVarsLabels := make([]int, 0, numOfExplanatoryVars), make([]string, 0, numOfExplanatoryVars)
+	for idx := range r.explanatoryVarsMatrix {
+		if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+			continue
+		}
+		indexesTable = append(indexesTable, idx)
+		explanatoryVarsLabels = append(explanatoryVarsLabels, r.GetExplanatoryVariableLabel(idx))
 	}
-	return retVal
-}
 
-func perverseMakeDataPoints(a [][]float64, obsIndex int) []*dataPoint {
-	retVal := make([]*dataPoint, 0, len(a))
-	for _, r := range a {
-		obs := r[obsIndex]
-		others := make([]float64, 0, len(r)-1)
-		for i, c := range r {
-			if i == obsIndex {
+	// 目的変数の観測値の平均と標準偏差
+	meanOfObjectiveVars, standardDeviationOfObjectiveVars := stat.MeanStdDev(r.objectiveVars, nil)
+
+	// 各説明変数の観測値の平均と標準偏差
+	meansOfExplanatoryVars, standardDeviationOfExplanatoryVars := make([]float64, 0, numOfExplanatoryVars), make([]float64, 0, numOfExplanatoryVars)
+	for idx, explanatoryVars := range r.explanatoryVarsMatrix {
+		if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+			continue
+		}
+		mean, standardDeviation := stat.MeanStdDev(explanatoryVars, nil)
+		meansOfExplanatoryVars = append(meansOfExplanatoryVars, mean)
+		standardDeviationOfExplanatoryVars = append(standardDeviationOfExplanatoryVars, standardDeviation)
+	}
+
+	objectiveVarsDense := mat.NewDense(numOfObservations, 1, r.objectiveVars)
+	colLen := numOfExplanatoryVars + 1 // +1: 定数項
+	explanatoryVarsDense := func() *mat.Dense {
+		d := mat.NewDense(numOfObservations, colLen, nil)
+		var row int
+		for idx, ev := range r.explanatoryVarsMatrix {
+			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
 				continue
 			}
-			others = append(others, c)
+			for col, ov := range ev {
+				d.Set(col, row, ov) // 転置する
+			}
+			row++
 		}
-		retVal = append(retVal, DataPoint(obs, others))
+		// 定数項を1で初期化する
+		for i := 0; i < numOfObservations; i++ {
+			d.Set(i, colLen-1, 1)
+		}
+		return d
+	}()
+
+	// 偏回帰係数とy切片を算出する
+	qr, qrQ, qrR, qTY := new(mat.QR), new(mat.Dense), new(mat.Dense), new(mat.Dense)
+	qr.Factorize(explanatoryVarsDense)
+	qr.QTo(qrQ) // 直交行列 Q
+	qr.RTo(qrR) // 上三角行列 R
+	qTY.Mul(qrQ.T(), objectiveVarsDense)
+	// ここで`qrR`は上三角行列なので
+	// GaussJordanの掃き出し法の後退代入で各係数を算出することができる
+	// （逆行列を計算する必要がない）
+	_coeffs := make([]float64, colLen)
+	for i := len(_coeffs) - 1; i >= 0; i-- {
+		_coeffs[i] = qTY.At(i, 0)
+		for j := i + 1; j < len(_coeffs); j++ {
+			_coeffs[i] -= _coeffs[j] * qrR.At(i, j)
+		}
+		_coeffs[i] /= qrR.At(i, i)
 	}
-	return retVal
+	intercept := _coeffs[len(_coeffs)-1] // y切片
+	coeffs := _coeffs[:len(_coeffs)-1]   // 係数
+
+	// 予測値
+	predictedVals := make([]float64, numOfObservations)
+	for i := range predictedVals {
+		val, err := calcPredictedVal(explanatoryVarsDense.RawRowView(i)[:numOfExplanatoryVars], coeffs, intercept)
+		if err != nil {
+			return nil, err
+		}
+		predictedVals[i] = val
+	}
+
+	// 残差
+	residuals := make([]float64, numOfObservations)
+	for i, ov := range r.objectiveVars {
+		residuals[i] = ov - predictedVals[i]
+	}
+
+	// 残差変動
+	var unexplainedVariation float64
+	for _, residual := range residuals {
+		unexplainedVariation += math.Pow(residual, 2)
+	}
+
+	// 回帰変動
+	var explainedVariation float64
+	for _, pv := range predictedVals {
+		explainedVariation += math.Pow(pv-meanOfObjectiveVars, 2)
+	}
+
+	// 全変動
+	totalVariation := unexplainedVariation + explainedVariation
+
+	// 決定係数
+	r2 := 1 - unexplainedVariation/totalVariation
+
+	return &basicRawModel{
+		indexesTable:                       indexesTable,
+		objectiveVarLabel:                  r.GetObjectiveVariableLabel(),
+		explanatoryVarsLabels:              explanatoryVarsLabels,
+		objectiveVarsDense:                 objectiveVarsDense,
+		explanatoryVarsDense:               explanatoryVarsDense,
+		numOfObservations:                  numOfObservations,
+		numOfExplanatoryVars:               numOfExplanatoryVars,
+		disregardedExplanatoryVarsSet:      disregardedExplanatoryVarsSet,
+		meanOfObjectiveVars:                meanOfObjectiveVars,
+		standardDeviationOfObjectiveVars:   standardDeviationOfObjectiveVars,
+		meansOfExplanatoryVars:             meansOfExplanatoryVars,
+		standardDeviationOfExplanatoryVars: standardDeviationOfExplanatoryVars,
+		coeffs:                             coeffs,
+		intercept:                          intercept,
+		predictedVals:                      predictedVals,
+		residuals:                          residuals,
+		totalVariation:                     totalVariation,
+		explainedVariation:                 explainedVariation,
+		unexplainedVariation:               unexplainedVariation,
+		r:                                  math.Sqrt(r2),
+		r2:                                 r2,
+	}, nil
+}
+
+// Run calculates a model using QR decomposition.
+func (r *Regression) Run() (*Model, error) {
+	bm, err := r.run()
+	if err != nil {
+		return nil, err
+	}
+
+	// 自由度
+	totalDegreeOfFreedom := float64(bm.numOfObservations - 1)
+	regressionDegreeOfFreedom := float64(bm.numOfExplanatoryVars)
+	residualDegreeOfFreedom := totalDegreeOfFreedom - regressionDegreeOfFreedom
+
+	// 自由度調整済み決定係数
+	adjustedR2 := 1 - (bm.unexplainedVariation/residualDegreeOfFreedom)/(bm.totalVariation/totalDegreeOfFreedom)
+
+	// 回帰の平方和 = 回帰変動
+	regressionSumOfSquares := bm.explainedVariation
+
+	// F検定
+	regressionFstat := (bm.explainedVariation / regressionDegreeOfFreedom) / (bm.unexplainedVariation / residualDegreeOfFreedom)
+
+	// 回帰の有意確率: Prob (F-statistic)
+	regressionProb := distuv.F{
+		D1: regressionDegreeOfFreedom,
+		D2: residualDegreeOfFreedom,
+	}.Survival(regressionFstat)
+
+	// 残差の平方和
+	var residualSumOfSquares float64
+	for _, residual := range bm.residuals {
+		residualSumOfSquares += math.Pow(residual, 2)
+	}
+
+	// 残差の分散（誤差の分散の不偏推定）
+	residualsVariance := residualSumOfSquares / residualDegreeOfFreedom
+
+	// 回帰の標準誤差（推定値の標準偏差）
+	standardError := math.Sqrt(residualsVariance)
+
+	// 説明変数の観測値の残差の行列
+	explanatoryVarsResidualsDense := mat.NewDense(bm.numOfObservations, bm.numOfExplanatoryVars, nil)
+	explanatoryVarsResidualsDense.Apply(func(i, j int, v float64) float64 {
+		return v - bm.meansOfExplanatoryVars[j]
+	}, bm.explanatoryVarsDense.Slice(0, bm.numOfObservations, 0, bm.numOfExplanatoryVars))
+
+	// 説明変数の偏差平方和積和行列
+	s := new(mat.Dense)
+	s.Mul(explanatoryVarsResidualsDense.T(), explanatoryVarsResidualsDense)
+
+	sQR, sQ, sR := new(mat.QR), new(mat.Dense), new(mat.Dense)
+	sQR.Factorize(s)
+	sQR.QTo(sQ) // 直交行列 Q
+	sQR.RTo(sR) // 上三角行列 R
+
+	sRInv := new(mat.Dense)
+	if err := sRInv.Inverse(sR); err != nil {
+		logger.Err.Printf("Cannot inverse a matrix: %v", err)
+		return nil, err
+	}
+
+	sInv := new(mat.Dense)
+	sInv.Mul(sRInv, sQ.T())
+
+	// 偏回帰係数の標準誤差
+	coeffsStandardErrors := make([]float64, bm.numOfExplanatoryVars)
+	for i := range coeffsStandardErrors {
+		coeffsStandardErrors[i] = standardError * math.Sqrt(sInv.At(i, i))
+	}
+
+	// 定数（y切片）の標準誤差
+	interceptStandardError := func() float64 {
+		var sum float64
+		for i := 0; i < bm.numOfExplanatoryVars; i++ {
+			for j := 0; j < bm.numOfExplanatoryVars; j++ {
+				sum += bm.meansOfExplanatoryVars[i] * bm.meansOfExplanatoryVars[j] * sInv.At(i, j)
+			}
+		}
+		return math.Sqrt((1/float64(bm.numOfObservations) + sum)) * standardError
+	}()
+
+	// 標準化偏回帰係数 β 及び t値
+	coeffsStandardized, coeffsTStats := make([]float64, bm.numOfExplanatoryVars), make([]float64, bm.numOfExplanatoryVars)
+	for i, coeff := range bm.coeffs {
+		coeffsStandardized[i] = coeff * bm.standardDeviationOfExplanatoryVars[i] / bm.standardDeviationOfObjectiveVars
+		coeffsTStats[i] = coeff / coeffsStandardErrors[i]
+	}
+
+	// 定数（y切片）のt値
+	interceptTStat := bm.intercept / interceptStandardError
+
+	pValues := func() []float64 {
+		tDistribution := distuv.StudentsT{
+			Mu:    0,
+			Sigma: 1,
+			Nu:    residualDegreeOfFreedom,
+		}
+		pvs := make([]float64, bm.numOfExplanatoryVars)
+		for i, tstat := range coeffsTStats {
+			pvs[i] = tDistribution.Survival(math.Abs(tstat)) * 2
+		}
+		return pvs
+	}()
+
+	// 目的変数と説明変数を一つの行列にまとめ、変数間の相関行列を求める
+	allDense := mat.NewDense(bm.numOfObservations, bm.numOfExplanatoryVars+1, nil)
+	allDense.SetCol(0, r.objectiveVars)
+	row := 1
+	for idx, explanatoryVars := range r.explanatoryVarsMatrix {
+		if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+			continue
+		}
+		allDense.SetCol(row, explanatoryVars)
+		row++
+	}
+	corrDense := new(mat.SymDense)
+	stat.CorrelationMatrix(corrDense, allDense, nil)
+
+	// 目的変数と各説明変数の相関係数を取り出す
+	coeffsCorrelations := make([]float64, bm.numOfExplanatoryVars)
+	for i := range coeffsCorrelations {
+		coeffsCorrelations[i] = corrDense.At(0, i+1)
+	}
+
+	// 相関行列から偏相関行列を求める
+	corrDenseInv := new(mat.Dense)
+	if err := corrDenseInv.Inverse(corrDense); err != nil {
+		logger.Err.Printf("Cannot inverse a matrix: %v", err)
+		return nil, err
+	}
+	coeffsPartialCorrelations := make([]float64, bm.numOfExplanatoryVars)
+	for i := range coeffsPartialCorrelations {
+		coeffsPartialCorrelations[i] = -1 * corrDenseInv.At(0, i+1) / math.Sqrt(corrDenseInv.At(0, 0)*corrDenseInv.At(i+1, i+1))
+	}
+
+	// 偏相関行列から部分相関行列を求める
+	coeffsPartCorrelations := func() []float64 {
+		if bm.numOfExplanatoryVars < 2 {
+			return coeffsPartialCorrelations
+		}
+		corrs, row := make([]float64, bm.numOfExplanatoryVars), 0
+		for idx := range r.explanatoryVarsMatrix {
+			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+				continue
+			}
+			r.disregardingExplanatoryVarsSet[idx] = struct{}{}
+			_bm, err := (&Regression{
+				objectiveVars:                  r.objectiveVars,
+				explanatoryVarsMatrix:          r.explanatoryVarsMatrix,
+				disregardingExplanatoryVarsSet: r.disregardingExplanatoryVarsSet,
+			}).run()
+			if err != nil {
+				panic(err) // Error should never happens
+			}
+			delete(r.disregardingExplanatoryVarsSet, idx)
+			corrs[row] = coeffsPartialCorrelations[row] * math.Sqrt(1-_bm.r2)
+			row++
+		}
+		return corrs
+	}()
+
+	// 許容度 及び 分散拡大係数（VIF）
+	coeffsTolerances, coeffsVIFs := make([]float64, 0, bm.numOfExplanatoryVars), make([]float64, 0, bm.numOfExplanatoryVars)
+	if bm.numOfExplanatoryVars < 2 {
+		coeffsTolerances, coeffsVIFs = make([]float64, bm.numOfExplanatoryVars), make([]float64, bm.numOfExplanatoryVars)
+	} else {
+		for idx, explanatoryVars := range r.explanatoryVarsMatrix {
+			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+				continue
+			}
+			r.disregardingExplanatoryVarsSet[idx] = struct{}{}
+			bm, err := (&Regression{
+				objectiveVars:                  explanatoryVars,
+				explanatoryVarsMatrix:          r.explanatoryVarsMatrix,
+				disregardingExplanatoryVarsSet: r.disregardingExplanatoryVarsSet,
+			}).run()
+			if err != nil {
+				panic(err) // Error should never happens
+			}
+			delete(r.disregardingExplanatoryVarsSet, idx)
+
+			tolerance := 1 - bm.r2
+			coeffsTolerances = append(coeffsTolerances, tolerance)
+			coeffsVIFs = append(coeffsVIFs, 1/tolerance)
+		}
+	}
+
+	logger.Info.Printf("Completed: Number of explanatory variables = %d", bm.numOfExplanatoryVars)
+
+	return newModel(&rawModel{
+		basicRawModel:             bm,
+		adjustedR2:                adjustedR2,
+		standardError:             standardError,
+		regressionSumOfSquares:    regressionSumOfSquares,
+		regressionDegreeOfFreedom: int(regressionDegreeOfFreedom),
+		regressionMeanOfSquares:   regressionSumOfSquares / regressionDegreeOfFreedom,
+		regressionFstat:           regressionFstat,
+		regressionProb:            regressionProb,
+		residualSumOfSquares:      residualSumOfSquares,
+		residualDegreeOfFreedom:   int(residualDegreeOfFreedom),
+		residualMeanOfSquares:     residualSumOfSquares / residualDegreeOfFreedom,
+		totalSumOfSquares:         regressionSumOfSquares + residualSumOfSquares,
+		totalDegreeOfFreedom:      int(totalDegreeOfFreedom),
+		interceptStandardError:    interceptStandardError,
+		coeffsStandardErrors:      coeffsStandardErrors,
+		coeffsStandardized:        coeffsStandardized,
+		interceptTStat:            interceptTStat,
+		coeffsTStats:              coeffsTStats,
+		coeffsProbs:               pValues,
+		coeffsCorrelations:        coeffsCorrelations,
+		coeffsPartialCorrelations: coeffsPartialCorrelations,
+		coeffsPartCorrelations:    coeffsPartCorrelations,
+		coeffsTolerances:          coeffsTolerances,
+		coeffsVIFs:                coeffsVIFs,
+	}), nil
+}
+
+// BackwardElimination : 変数減少法で解析する
+func (r *Regression) BackwardElimination(p float64) ([]Model, error) {
+	originalDisregardingExplanatoryVarsSet := make(map[int]struct{}, len(r.disregardingExplanatoryVarsSet))
+	for k, v := range r.disregardingExplanatoryVarsSet {
+		originalDisregardingExplanatoryVarsSet[k] = v
+	}
+	defer func() {
+		r.disregardingExplanatoryVarsSet = originalDisregardingExplanatoryVarsSet
+	}()
+
+	var models []Model
+	for {
+		model, err := r.Run()
+		if err != nil {
+			return models, err
+		}
+		models = append(models, *model)
+		if model.NumOfExplanatoryVars == 1 {
+			break
+		}
+		eliminationTarget, border := (*ExplanatoryVarResult)(nil), p
+		for i := range model.ExplanatoryVars {
+			if model.ExplanatoryVars[i].Prob > border {
+				eliminationTarget = &model.ExplanatoryVars[i]
+				border = model.ExplanatoryVars[i].Prob
+			}
+		}
+		if eliminationTarget == nil {
+			break
+		}
+		logger.Info.Printf("Eliminate %s having p-value = %f", eliminationTarget.Label, eliminationTarget.Prob)
+		r.DisregardIndex(eliminationTarget.OriginalIndex)
+	}
+	return models, nil
 }
