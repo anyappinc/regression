@@ -1,21 +1,19 @@
 regression
 =======
-[![GoDoc](https://godoc.org/github.com/sajari/regression?status.svg)](https://godoc.org/github.com/sajari/regression)
-[![Go Report Card](https://goreportcard.com/badge/sajari/regression)](https://goreportcard.com/report/sajari/regression)
-[![Build Status](https://travis-ci.org/sajari/regression.svg?branch=master)](https://travis-ci.org/sajari/regression)
 [![License][license-image]][license-url]
 
 [license-image]: http://img.shields.io/badge/license-MIT-green.svg?style=flat-square
 [license-url]: LICENSE.txt
 
+Goで重回帰分析するライブラリ  
 Multivariable Linear Regression in Go (golang)
+
+*NOTE: This project is originally based on https://github.com/sajari/regression*
 
 installation
 ------------
 
-    $ go get github.com/sajari/regression
-
-Supports Go 1.8+
+    $ go get github.com/anyappinc/regression
 
 example usage
 -------------
@@ -28,7 +26,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/sajari/regression"
+	"github.com/anyappinc/regression"
 )
 
 func main() {
