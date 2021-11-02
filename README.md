@@ -1,4 +1,4 @@
-regression
+regression v2
 =======
 [![License][license-image]][license-url]
 
@@ -13,7 +13,7 @@ Multivariable Linear Regression in Go (golang)
 installation
 ------------
 
-    $ go get github.com/anyappinc/regression
+    $ go get github.com/anyappinc/regression/v2
 
 example usage
 -------------
@@ -26,7 +26,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/anyappinc/regression"
+	"github.com/anyappinc/regression/v2"
 )
 
 func main() {

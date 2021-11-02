@@ -1,4 +1,4 @@
-module github.com/anyappinc/regression
+module github.com/anyappinc/regression/v2
 
 go 1.14
 

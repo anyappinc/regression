@@ -5,7 +5,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/anyappinc/regression/logger"
+	"github.com/anyappinc/regression/v2/logger"
 	"gonum.org/v1/gonum/mat"
 	"gonum.org/v1/gonum/stat"
 	"gonum.org/v1/gonum/stat/distuv"
