@@ -498,7 +498,9 @@ func (r *Regression) Run() (*Model, error) {
 }
 
 // BackwardElimination : 変数減少法で解析する
-func (r *Regression) BackwardElimination(p float64) ([]Model, error) {
+//
+// `forcedExpVarsIndexesSet`に指定したインデックスの説明変数は強制投入（必ず使用）される
+func (r *Regression) BackwardElimination(p float64, forcedExpVarsIndexesSet map[int]struct{}) ([]Model, error) {
 	originalDisregardingExplanatoryVarsSet := make(map[int]struct{}, len(r.disregardingExplanatoryVarsSet))
 	for k, v := range r.disregardingExplanatoryVarsSet {
 		originalDisregardingExplanatoryVarsSet[k] = v
@@ -519,6 +521,10 @@ func (r *Regression) BackwardElimination(p float64) ([]Model, error) {
 		}
 		eliminationTarget, border := (*ExplanatoryVarResult)(nil), p
 		for i := range model.ExplanatoryVars {
+			// 強制投入する変数は除かない
+			if _, ok := forcedExpVarsIndexesSet[model.ExplanatoryVars[i].OriginalIndex]; ok {
+				continue
+			}
 			if model.ExplanatoryVars[i].Prob > border {
 				eliminationTarget = &model.ExplanatoryVars[i]
 				border = model.ExplanatoryVars[i].Prob
