@@ -320,6 +320,32 @@ func (r *Regression) Run() (*Model, error) {
 	// 回帰の標準誤差（推定値の標準偏差）
 	standardError := math.Sqrt(residualsVariance)
 
+	// 許容度 及び 分散拡大係数（VIF）
+	coeffsTolerances, coeffsVIFs := make([]float64, 0, bm.numOfExplanatoryVars), make([]float64, 0, bm.numOfExplanatoryVars)
+	if bm.numOfExplanatoryVars < 2 {
+		coeffsTolerances, coeffsVIFs = make([]float64, bm.numOfExplanatoryVars), make([]float64, bm.numOfExplanatoryVars)
+	} else {
+		for idx, explanatoryVars := range r.explanatoryVarsMatrix {
+			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+				continue
+			}
+			r.disregardingExplanatoryVarsSet[idx] = struct{}{}
+			bm, err := (&Regression{
+				objectiveVars:                  explanatoryVars,
+				explanatoryVarsMatrix:          r.explanatoryVarsMatrix,
+				disregardingExplanatoryVarsSet: r.disregardingExplanatoryVarsSet,
+			}).run()
+			if err != nil {
+				panic(err) // Error should never happens
+			}
+			delete(r.disregardingExplanatoryVarsSet, idx)
+
+			tolerance := 1 - bm.r2
+			coeffsTolerances = append(coeffsTolerances, tolerance)
+			coeffsVIFs = append(coeffsVIFs, 1/tolerance)
+		}
+	}
+
 	// 説明変数の観測値の残差の行列
 	explanatoryVarsResidualsDense := mat.NewDense(bm.numOfObservations, bm.numOfExplanatoryVars, nil)
 	explanatoryVarsResidualsDense.Apply(func(i, j int, v float64) float64 {
@@ -440,32 +466,6 @@ func (r *Regression) Run() (*Model, error) {
 		}
 		return corrs
 	}()
-
-	// 許容度 及び 分散拡大係数（VIF）
-	coeffsTolerances, coeffsVIFs := make([]float64, 0, bm.numOfExplanatoryVars), make([]float64, 0, bm.numOfExplanatoryVars)
-	if bm.numOfExplanatoryVars < 2 {
-		coeffsTolerances, coeffsVIFs = make([]float64, bm.numOfExplanatoryVars), make([]float64, bm.numOfExplanatoryVars)
-	} else {
-		for idx, explanatoryVars := range r.explanatoryVarsMatrix {
-			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
-				continue
-			}
-			r.disregardingExplanatoryVarsSet[idx] = struct{}{}
-			bm, err := (&Regression{
-				objectiveVars:                  explanatoryVars,
-				explanatoryVarsMatrix:          r.explanatoryVarsMatrix,
-				disregardingExplanatoryVarsSet: r.disregardingExplanatoryVarsSet,
-			}).run()
-			if err != nil {
-				panic(err) // Error should never happens
-			}
-			delete(r.disregardingExplanatoryVarsSet, idx)
-
-			tolerance := 1 - bm.r2
-			coeffsTolerances = append(coeffsTolerances, tolerance)
-			coeffsVIFs = append(coeffsVIFs, 1/tolerance)
-		}
-	}
 
 	logger.Info.Printf("Completed: Number of explanatory variables = %d", bm.numOfExplanatoryVars)
 
