@@ -2,6 +2,7 @@ package regression
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 
@@ -363,8 +364,15 @@ func (r *Regression) Run() (*Model, error) {
 
 	sRInv := new(mat.Dense)
 	if err := sRInv.Inverse(sR); err != nil {
-		logger.Err.Printf("Cannot inverse a matrix: %v", err)
-		return nil, err
+		e := fmt.Errorf("cannot inverse a matrix(sR): %w", err)
+
+		logger.Err.Println(e)
+
+		if errors.As(e, &matConditionError) {
+			return nil, wrapAsConditionError(e, &ConditionErrorHint{ExplanatoryVars: newExplanatoryVarHints(bm, coeffsVIFs)})
+		}
+
+		return nil, e
 	}
 
 	sInv := new(mat.Dense)
@@ -433,8 +441,15 @@ func (r *Regression) Run() (*Model, error) {
 	// 相関行列から偏相関行列を求める
 	corrDenseInv := new(mat.Dense)
 	if err := corrDenseInv.Inverse(corrDense); err != nil {
-		logger.Err.Printf("Cannot inverse a matrix: %v", err)
-		return nil, err
+		e := fmt.Errorf("cannot inverse a matrix(corrDense): %w", err)
+
+		logger.Err.Println(e)
+
+		if errors.As(e, &matConditionError) {
+			return nil, wrapAsConditionError(e, &ConditionErrorHint{ExplanatoryVars: newExplanatoryVarHints(bm, coeffsVIFs)})
+		}
+
+		return nil, e
 	}
 	coeffsPartialCorrelations := make([]float64, bm.numOfExplanatoryVars)
 	for i := range coeffsPartialCorrelations {
