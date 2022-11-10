@@ -512,6 +512,33 @@ func (r *Regression) Run() (*Model, error) {
 	}), nil
 }
 
+// ValidateExplanatoryVars returns indexes of invalid explanatory variables.
+// It considers an explanatory variable is not valid if is has all same observed values.
+func (r *Regression) ValidateExplanatoryVars() []int {
+	var invalidExplanatoryVarIndexes []int
+
+EACH_EXPVAR:
+	for i := range r.explanatoryVarsMatrix {
+		if _, ok := r.disregardingExplanatoryVarsSet[i]; ok {
+			continue
+		}
+
+		if len(r.explanatoryVarsMatrix[i]) == 0 {
+			continue
+		}
+
+		for j := range r.explanatoryVarsMatrix[i][1:] {
+			if r.explanatoryVarsMatrix[i][0] != r.explanatoryVarsMatrix[i][j+1] {
+				continue EACH_EXPVAR
+			}
+		}
+
+		invalidExplanatoryVarIndexes = append(invalidExplanatoryVarIndexes, i)
+	}
+
+	return invalidExplanatoryVarIndexes
+}
+
 // BackwardElimination : 変数減少法で解析する
 //
 // `forcedExpVarsIndexesSet`に指定したインデックスの説明変数は強制投入（必ず使用）される
