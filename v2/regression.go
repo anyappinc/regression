@@ -2,6 +2,7 @@ package regression
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 
@@ -320,6 +321,32 @@ func (r *Regression) Run() (*Model, error) {
 	// 回帰の標準誤差（推定値の標準偏差）
 	standardError := math.Sqrt(residualsVariance)
 
+	// 許容度 及び 分散拡大係数（VIF）
+	coeffsTolerances, coeffsVIFs := make([]float64, 0, bm.numOfExplanatoryVars), make([]float64, 0, bm.numOfExplanatoryVars)
+	if bm.numOfExplanatoryVars < 2 {
+		coeffsTolerances, coeffsVIFs = make([]float64, bm.numOfExplanatoryVars), make([]float64, bm.numOfExplanatoryVars)
+	} else {
+		for idx, explanatoryVars := range r.explanatoryVarsMatrix {
+			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
+				continue
+			}
+			r.disregardingExplanatoryVarsSet[idx] = struct{}{}
+			bm, err := (&Regression{
+				objectiveVars:                  explanatoryVars,
+				explanatoryVarsMatrix:          r.explanatoryVarsMatrix,
+				disregardingExplanatoryVarsSet: r.disregardingExplanatoryVarsSet,
+			}).run()
+			if err != nil {
+				panic(err) // Error should never happens
+			}
+			delete(r.disregardingExplanatoryVarsSet, idx)
+
+			tolerance := 1 - bm.r2
+			coeffsTolerances = append(coeffsTolerances, tolerance)
+			coeffsVIFs = append(coeffsVIFs, 1/tolerance)
+		}
+	}
+
 	// 説明変数の観測値の残差の行列
 	explanatoryVarsResidualsDense := mat.NewDense(bm.numOfObservations, bm.numOfExplanatoryVars, nil)
 	explanatoryVarsResidualsDense.Apply(func(i, j int, v float64) float64 {
@@ -337,8 +364,15 @@ func (r *Regression) Run() (*Model, error) {
 
 	sRInv := new(mat.Dense)
 	if err := sRInv.Inverse(sR); err != nil {
-		logger.Err.Printf("Cannot inverse a matrix: %v", err)
-		return nil, err
+		e := fmt.Errorf("cannot inverse a matrix(sR): %w", err)
+
+		logger.Err.Println(e)
+
+		if errors.As(e, &matConditionError) {
+			return nil, wrapAsConditionError(e, &ConditionErrorHint{ExplanatoryVars: newExplanatoryVarHints(bm, coeffsVIFs)})
+		}
+
+		return nil, e
 	}
 
 	sInv := new(mat.Dense)
@@ -407,8 +441,15 @@ func (r *Regression) Run() (*Model, error) {
 	// 相関行列から偏相関行列を求める
 	corrDenseInv := new(mat.Dense)
 	if err := corrDenseInv.Inverse(corrDense); err != nil {
-		logger.Err.Printf("Cannot inverse a matrix: %v", err)
-		return nil, err
+		e := fmt.Errorf("cannot inverse a matrix(corrDense): %w", err)
+
+		logger.Err.Println(e)
+
+		if errors.As(e, &matConditionError) {
+			return nil, wrapAsConditionError(e, &ConditionErrorHint{ExplanatoryVars: newExplanatoryVarHints(bm, coeffsVIFs)})
+		}
+
+		return nil, e
 	}
 	coeffsPartialCorrelations := make([]float64, bm.numOfExplanatoryVars)
 	for i := range coeffsPartialCorrelations {
@@ -441,32 +482,6 @@ func (r *Regression) Run() (*Model, error) {
 		return corrs
 	}()
 
-	// 許容度 及び 分散拡大係数（VIF）
-	coeffsTolerances, coeffsVIFs := make([]float64, 0, bm.numOfExplanatoryVars), make([]float64, 0, bm.numOfExplanatoryVars)
-	if bm.numOfExplanatoryVars < 2 {
-		coeffsTolerances, coeffsVIFs = make([]float64, bm.numOfExplanatoryVars), make([]float64, bm.numOfExplanatoryVars)
-	} else {
-		for idx, explanatoryVars := range r.explanatoryVarsMatrix {
-			if _, ok := r.disregardingExplanatoryVarsSet[idx]; ok {
-				continue
-			}
-			r.disregardingExplanatoryVarsSet[idx] = struct{}{}
-			bm, err := (&Regression{
-				objectiveVars:                  explanatoryVars,
-				explanatoryVarsMatrix:          r.explanatoryVarsMatrix,
-				disregardingExplanatoryVarsSet: r.disregardingExplanatoryVarsSet,
-			}).run()
-			if err != nil {
-				panic(err) // Error should never happens
-			}
-			delete(r.disregardingExplanatoryVarsSet, idx)
-
-			tolerance := 1 - bm.r2
-			coeffsTolerances = append(coeffsTolerances, tolerance)
-			coeffsVIFs = append(coeffsVIFs, 1/tolerance)
-		}
-	}
-
 	logger.Info.Printf("Completed: Number of explanatory variables = %d", bm.numOfExplanatoryVars)
 
 	return newModel(&rawModel{
@@ -495,6 +510,33 @@ func (r *Regression) Run() (*Model, error) {
 		coeffsTolerances:          coeffsTolerances,
 		coeffsVIFs:                coeffsVIFs,
 	}), nil
+}
+
+// ValidateExplanatoryVars returns indexes of invalid explanatory variables.
+// It considers an explanatory variable is not valid if is has all same observed values.
+func (r *Regression) ValidateExplanatoryVars() []int {
+	var invalidExplanatoryVarIndexes []int
+
+EACH_EXPVAR:
+	for i := range r.explanatoryVarsMatrix {
+		if _, ok := r.disregardingExplanatoryVarsSet[i]; ok {
+			continue
+		}
+
+		if len(r.explanatoryVarsMatrix[i]) == 0 {
+			continue
+		}
+
+		for j := range r.explanatoryVarsMatrix[i][1:] {
+			if r.explanatoryVarsMatrix[i][0] != r.explanatoryVarsMatrix[i][j+1] {
+				continue EACH_EXPVAR
+			}
+		}
+
+		invalidExplanatoryVarIndexes = append(invalidExplanatoryVarIndexes, i)
+	}
+
+	return invalidExplanatoryVarIndexes
 }
 
 // BackwardElimination : 変数減少法で解析する
