@@ -290,9 +290,18 @@ func (r *Regression) Run() (*Model, error) {
 	}
 
 	// 自由度
+	// `bm.numOfObservations`が2より大きいことと
+	// `bm.numOfExplanatoryVars`が`bm.numOfObservations`より小さいことはすでに保証されている
 	totalDegreeOfFreedom := float64(bm.numOfObservations - 1)
 	regressionDegreeOfFreedom := float64(bm.numOfExplanatoryVars)
 	residualDegreeOfFreedom := totalDegreeOfFreedom - regressionDegreeOfFreedom
+
+	// 説明変数の数が観測値の数のよりちょうど1少ないとき、
+	// `residualDegreeOfFreedom`（残差自由度）が0になる
+	// ただし条件式は`gonum`内部の`cephes.Incbet`に合わせる
+	if residualDegreeOfFreedom <= 0 {
+		return nil, ErrTooManyExplanatoryVars
+	}
 
 	// 自由度調整済み決定係数
 	adjustedR2 := 1 - (bm.unexplainedVariation/residualDegreeOfFreedom)/(bm.totalVariation/totalDegreeOfFreedom)
