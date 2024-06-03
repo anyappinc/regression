@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
 
 	"github.com/anyappinc/regression/v2/logger"
@@ -283,7 +284,27 @@ func (r *Regression) run() (*basicRawModel, error) {
 }
 
 // Run calculates a model using QR decomposition.
-func (r *Regression) Run() (*Model, error) {
+// Named return values are only used to set an error when recovering from panic.
+func (r *Regression) Run() (emptyModel *Model, recErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stackTrace := make([]byte, 1024)
+			stackSize := runtime.Stack(stackTrace, false)
+			for stackSize == len(stackTrace) {
+				stackTrace = make([]byte, len(stackTrace)*2)
+				stackSize = runtime.Stack(stackTrace, false)
+			}
+			stackTrace = stackTrace[:stackSize]
+
+			switch r := r.(type) {
+			case error:
+				recErr = fmt.Errorf("recovered from panic: %w\n\n%s", r, stackTrace)
+			default:
+				recErr = fmt.Errorf("recovered from panic: %v\n\n%s", r, stackTrace)
+			}
+		}
+	}()
+
 	bm, err := r.run()
 	if err != nil {
 		return nil, err
