@@ -133,11 +133,11 @@ func (r *Regression) AddObservations(observations ...*observation) error {
 }
 
 func (r *Regression) run() (*basicRawModel, error) {
-	if len(r.objectiveVars) <= 2 {
+	numOfObservations := len(r.objectiveVars) // == len(r.explanatoryVarsMatrix[n])
+	if numOfObservations <= 2 {
 		return nil, ErrNotEnoughObservations
 	}
 
-	numOfObservations := len(r.objectiveVars) // == len(r.explanatoryVarsMatrix[n])
 	disregardedExplanatoryVarsSet := map[int]struct{}{}
 	numOfExplanatoryVars := func() int {
 		_numOfExplanatoryVars, _numToIgnore := len(r.explanatoryVarsMatrix), len(r.disregardingExplanatoryVarsSet)
